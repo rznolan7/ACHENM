@@ -1,0 +1,658 @@
+---
+titlD: "Creating Master Files for Maxent"
+author: "Rhiannon Nolan"
+datD: "2023-09-19"
+output: html_document
+---
+
+```{R, echo=FALSE}
+#GLOBAL R chunk options.
+#   (to hide this message add "echo=FALSE" to the code chunk options)
+
+knitr::opts_chunk$set(comment = NA, message = FALSE, warning = FALSE, width = 100)
+knitr::opts_chunk$set(fig.align = "center", fig.height = 4, fig.width = 6)
+
+#knitr::opts_chunk$set(cache = TRUE, autodep=TRUE)
+```
+
+```{R}
+#loading the requisite libraries for generating the master.background and master.occurrence files
+library(raster)
+library(dplyr)
+```
+
+# Skip to line 366 for data input
+
+```{R}
+# function that adds k-folds to the dataset
+#k-folds are a statistical method of cross-validation, to verify the goodness of the model. resampling 
+#to test model on small datasets. k is the number of groups you split the data into.
+
+### Arguments ###
+# x    <- vector or data.frame of your occurrences
+# 
+# k    <- number of folds you want to make
+# 
+# seed <- value for set.seed in case you want to reproduce your exact k-fold samples in the future
+
+# returns a vector that has the same length as nrow(x) that contains the k-fold bin that the occurrences got assigned to
+
+#took the part about "if class is not data frame, make it so" out of the function below because it wouldn't work
+
+make.kfolds <- function(x, k=5, seed=NULL){
+  if(class(x) != "data.frame"){
+    class(x) <- "data.frame"
+  }
+  n <- nrow(x)
+  rep.times <- n %/% k   # number of full reps for the rep function
+  k.bins <- rep.times*k   # number of occs minus any remainder when dividing by k
+  remainder <- n - k.bins   # find the remainder
+  output <- rep(1:k, rep.times)   # make k bins of equal size
+  if(!is.null(seed)){
+    set.seed(seed)
+  }
+  if(remainder != 0){   # if there is a remainder, . . .
+    extra <- sample(x=1:k, size=remainder)   # randomly sample it. . .
+    output <- c(output, extra)   # . . . and add it to the output
+  }
+  output <- sample(output, size=n)   #  randomize the order of the output
+  return(output)
+}
+```
+
+
+
+```{R}
+# function that makes a background file for each extent (time.bin and/or region) in the analysis
+# merging the background files for every extent will create the master background file
+
+### ARGUMENTS ###
+# r.stack  <- a raster stack containing all the predictor variables for analysis for a given extent
+#             if using multiple extents, ensure that all the predictor variables have the exact same name and are in the same order
+#             if testing multiple types of variables (i.e., GCM-based vs sedimentology-based), it is ideal to separate them into . . .
+#             . . . those two categories before reading them into R
+#
+# x.col    <- the column name of the x-coordinate to be put in the background/occurrence objects
+#             this MUST be consistent for all background/occurrence objects
+#
+# y.col    <- the column name of the y-coordinate to be put in the background/occurrence objects
+#             this MUST be consistent for all background/occurrence objects
+#
+# time.bin <- the name of the time.bin to be put in the background/occurrence objects
+#             if only using a single time.bin, keep this consistent for all background/occurrence objects
+#
+# region   <- the name of the region to be put in the background/occurrence objects
+#             if only using a single region, keep this consistent for all background/occurrence objects
+# 
+# k.folds  <- the number of folds you want to run for cross-validation
+#             k stops at 26 because you don't want to run 27+ fold cross-validation. The resulting data.frame becomes unwieldy.
+
+
+make.background.df <- function(r.stack, x.col='long', y.col='lat', time.bin='time1', region=1, k.folds=5){
+  
+  # ensuring that k.folds is a positive integer between [1,26]
+  if( !is.null(k.folds) ){
+    if( k.folds < 1){
+      k.folds <- 1
+      print('NOTD: Making background data.frame without any k.folds.')
+    } else if( k.folds > 26 ){
+      k.folds <- 26
+      warning('k.folds has been set to 26.')
+    } else if( k.folds%%1 != 0 ){
+      warning('k.folds has been rounded to the nearest whole number.')
+      k.folds <- round(k.folds)
+    }
+  } else {
+    k.folds <- 1
+    print('NOTD: Making background data.frame without any k.folds.')
+  }
+  
+  # extracting the env-variables to a data.frame
+  coords.df <- raster::sampleRandom(r.stack, ncell(r.stack), xy=TRUE, sp=FALSE, na.rm=FALSE)
+  colnames(coords.df)[1:2] <- c(x.col, y.col)
+  coords.df <- coords.df[complete.cases(coords.df), ]
+  n.points <- nrow(coords.df)
+  
+  # making the data.frame of the name, time.bin, region, and presence columns
+  d.cols <- as.data.frame( matrix(0, nrow=n.points, ncol=4) )
+  d.cols[,1] <- 'Background'
+  d.cols[,2] <- time.bin
+  d.cols[,3] <- region
+  colnames(d.cols) <- c('Name', 'time.bin', 'region', 'presence')
+  
+  # merging everything together
+  out <- do.call('cbind', list( d.cols[,1],  coords.df[,1:2], d.cols[,2:3], coords.df[,3:ncol(coords.df)], d.cols[,4] ))
+  colnames(out)[1] <- 'Name'
+  colnames(out)[ ncol(out) ] <- 'presence'
+  
+  # making the cross-validation columns
+  if( k.folds > 1 ){
+    ltrs <- letters[1:k.folds]
+    # training columns
+    train <- as.data.frame( matrix(0, nrow=n.points, ncol=k.folds) )
+    for(i in 1:k.folds){
+      colnames(train)[i] <- paste0('tr.', paste(ltrs[-(k.folds+1-i)], collapse='') )
+    }
+    # testing columns
+    test <- as.data.frame( matrix(0, nrow=n.points, ncol=k.folds) )
+    for(i in 1:k.folds){
+      colnames(test)[i] <- paste0('test.', paste(ltrs[(k.folds+1-i)], collapse='') )
+    }
+    
+    out <- do.call('cbind', list( out, train, test ) )
+  }
+  
+  # output
+  return(out)
+}
+```
+
+```{R}
+# function that makes an occurrence file for each extent (time.bin and/or region) in the analysis
+# merging the occurrence files for every extent will create the master occurrence file
+# MUST have the make.kfolds function also loaded
+
+### ARGUMENTS ###
+# r.stack  <- a raster stack containing all the predictor variables for analysis for a given extent
+#             if using multiple extents, ensure that all the predictor variables have the exact same name and are in the same order
+#             if testing multiple types of variables (i.e., GCM-based vs sedimentology-based), it is ideal to seperate them into . . .
+#             . . . those two categories before reading them into R
+# 
+# taxa.df  <- a data.frame of occurrence with three columns that havD:
+#             1.) the names of the taxa you are modeling
+#             2.) the x-coordinates of the occurrences
+#             3.) the y-coordinates of the occurrences
+#             THESE COLUMNS MUST BE IN THIS ORDER!!!
+#             this is the same format as the SWD (species with data) format for the regular maxent.jar file
+#
+# x.col    <- the column name of the x-coordinate to be put in the background/occurrence objects
+#             this MUST be consistent for all background/occurrence objects
+#
+# y.col    <- the column name of the y-coordinate to be put in the background/occurrence objects
+#             this MUST be consistent for all background/occurrence objects
+#
+# time.bin <- the name of the time.bin to be put in the background/occurrence objects
+#             if only using a single time.bin, keep this consistent for all background/occurrence objects
+#
+# region   <- the name of the region to be put in the background/occurrence objects
+#             if only using a single region, keep this consistent for all background/occurrence objects
+# 
+# k.folds  <- the number of folds you want to run for cross-validation
+#             k stops at 26 because you don't want to run 27+ fold cross-validation. The resulting data.frame becomes unwieldy.
+#
+# k.seed   <- value for set.seed in case you want to reproduce your exact k-fold samples in the future
+#             NOTE that this set.seed will apply exactly the same to every species you are modeling
+#
+
+make.occurrence.df <- function(r.stack, taxa.df, x.col='long', y.col='lat', time.bin='time1', region=1, k.folds=5, k.seed=NULL){
+  
+  
+  # ensuring that k.folds is a positive integer between [1,26]
+  if( !is.null(k.folds) ){
+    if( k.folds < 1){
+      k.folds <- 1
+      print('NOTD: Making occurrence data.frame without any k.folds.')
+    } else if( k.folds > 26 ){
+      k.folds <- 26
+      warning('k.folds has been set to 26.')
+    } else if( k.folds%%1 != 0 ){
+      warning('k.folds has been rounded to the nearest whole number.')
+      k.folds <- round(k.folds)
+    }
+  } else {
+    k.folds <- 1
+    print('NOTD: Making occurrence data.frame without any k.folds.')
+  }
+  
+  # extracting the env-variables to a data.frame
+  occs.df <- raster::extract(x=r.stack, y=taxa.df[,2:3])
+  occs.df <- cbind(taxa.df, occs.df)
+  colnames(occs.df)[2:3] <- c(x.col, y.col)
+  occs.df <- occs.df[complete.cases(occs.df), ]
+  colnames(occs.df)[1] <-'Name'
+  n.occs <- nrow(occs.df)
+  
+  # making the data.frame of the name, time.bin, region, and presence columns
+  d.cols <- as.data.frame( matrix(0, nrow=n.occs, ncol=3) )
+  d.cols[,1] <- time.bin
+  d.cols[,2] <- region
+  colnames(d.cols) <- c('time.bin', 'region', 'presence')
+  
+  # merging everything together
+  occs.df <- do.call('cbind', list(occs.df[,1:3], d.cols[,1:2], occs.df[,4:ncol(occs.df)], d.cols[,3] ) )
+  colnames(occs.df)[ ncol(occs.df) ] <- 'presence'
+  
+  # making the cross-validation columns
+  if( k.folds > 1 ){
+    
+    ltrs <- letters[1:k.folds]
+    # training columns
+    train <- as.data.frame( matrix(1, nrow=n.occs, ncol=k.folds) )
+    for(i in 1:k.folds){
+      colnames(train)[i] <- paste0('tr.', paste(ltrs[-(k.folds+1-i)], collapse='') )
+    }
+    # testing columns
+    test <- as.data.frame( matrix(0, nrow=n.occs, ncol=k.folds) )
+    for(i in 1:k.folds){
+      colnames(test)[i] <- paste0('test.', paste(ltrs[(k.folds+1-i)], collapse='') )
+    }
+    
+    # splitting up the occurrence data.frame by taxon, then assigning the k.folds
+    occs.list <- base::split(occs.df, occs.df[,1])
+    n.taxa <- length(occs.list)
+    for(i in 1:n.taxa){
+      
+      # setting all taxa with < k.folds occurrences to 0's. they will later be converted to exist in all the training and testing subsets
+      if( nrow( occs.list[[i]] ) < k.folds ){
+        occs.list[[i]]$presence <- 0
+      } else {
+        # filling in cross-validation folds for taxa who have > k.folds in terms of occurrences
+        occs.list[[i]]$presence <- make.kfolds(occs.list[[i]], k=k.folds, seed=k.seed)
+      }
+      
+      
+    } # closing for(i in 1:n.taxa)
+    
+    # merging all the different taxa back together
+    occs.df <- do.call('rbind', occs.list)
+    colnames(occs.df)[ ncol(occs.df) ] <- 'presence'
+    row.names(occs.df) <- 1:nrow(occs.df)
+    
+    # assigning the k.fold parameters in occs.df
+    for(i in 1:nrow(occs.df) ){
+      
+      # for taxa with fewer occs than k.folds
+      if( occs.df$presence[i] == 0 ){
+        # train[i,] <- 1   # train is filled with 1's by default
+        test[i,] <- 1
+      } else {
+        # for taxa with greater occs than k.folds
+        cv <- occs.df$presence[i]
+        train[i, (k.folds+1-cv) ] <- 0
+        test[i, (k.folds+1-cv) ] <- 1
+      }
+    } # closing for(i in 1:nrow(occs.df) )
+    
+    
+    
+    out <- do.call('cbind', list( occs.df, train, test ) )
+    
+  } # closing if( k.folds > 1 )
+  
+  # setting all the presence rows to  1
+  out$presence <- 1
+  
+  
+  # output
+  return(out)
+}
+```
+
+```{R}
+# function that reduces occurrences to one per grid cell
+
+### ARGUMENTS ###
+## occ.data = data.frame of the occurrence file
+## rast = raster of the entire background training extent
+#  there will be issues if any occs are in grid cells with NA values (i.e., outside the extent)
+## name = name of the column that has the taxa names
+## long= column name that has longitude
+## lat = column name that has latitude
+## max.dist = argument from seegSDM. distance is in map units (e.g., degrees) if the raster is projected, otherwise, it is in meters.
+#  if any occurrences lie JUST BARELY outside the extent, this function will assign them to the nearest gril cell . . .
+#  . . . inside the extent if the distance from that occurrence to the nearest cell is <= max.dist.
+#  otherwise, that point is ignored.
+#  recommended that you remove points outside the extent first. it's easier to clear up that way
+## round.to is how many decimal places to round the coordinates to
+#  fewer decimal plaes = faster run times
+
+
+# nearestLand function extracted from seegSDM as that package doesn't appear to exist for more versions (> 3.6.2) of R
+# this version of nearestLand is from seegSDM version 0.1-9  
+seegSDM_nearestLand <- function (points, raster, max_distance) {
+  nearest <- function(lis, raster) {
+    neighbours <- matrix(lis[[1]], ncol = 2)
+    point <- lis[[2]]
+    land <- !is.na(neighbours[, 2])
+    if (!any(land)) {
+      return(c(NA, NA))
+    } else {
+      coords <- xyFromCell(raster, neighbours[land, 1])
+      if (nrow(coords) == 1) {
+        return(coords[1, ])
+      }
+      dists <- sqrt((coords[, 1] - point[1])^2 + (coords[, 2] - point[2])^2)
+      return(coords[which.min(dists), ])
+    } # ending else
+  }  # ending nearest
+  
+  neighbour_list <- extract(raster, points, buffer = max_distance, cellnumbers = TRUE)
+  neighbour_list <- lapply(1:nrow(points), function(i) {
+    list(neighbours = neighbour_list[[i]], point = as.numeric(points[i, ]))
+  })
+  return(t(sapply(neighbour_list, nearest, raster)))
+}
+
+
+one.occ.per.grid.cell.no.SEEG <- function(occ.data, rast, name = 'species', long = 'long', lat = 'lat', max.dist = 1.2, round.to = 2) {
+  require(raster)
+  occ.mat <- as.matrix(occ.data[,c(long, lat)])
+  occ.mat <- round(occ.mat, digits = round.to)
+  moved <- seegSDM_nearestLand(occ.mat, raster=rast, max_distance=max.dist) # centers occ. points within the grid cell they occur in
+  moved <- as.data.frame(moved)
+  moved <- cbind(occ.data[,name], moved)   # bind names and the paleo-longitudes
+  colnames(moved) <- c(name, 'long.thin', 'lat.thin')
+  moved <- unique(moved)   # returns only one occurrence per entity per grid
+  numbs <- as.numeric(row.names(moved))  # row numbers of the thinned data
+  out <- occ.data[numbs,]   # thinning the original data with the rows of the thinned data
+  return(out)
+}
+
+
+#genus.thinned <- one.occ.per.grid.cell(occ.data=genera.only, rast=arcmin30, name='Taxon', round.to=2)
+# took ~ 9 seconds to run spatial thinning
+```
+
+```{R, eval=FALSE}
+rm(list=ls(all=TRUE))
+```
+
+
+```{R}
+# reading in the occurrence file
+library(tidyverse)
+
+#load in env csv file with lat, long, time bins
+env_sp <- read_csv("D:/202508_MaxentModels/1_Occurrence_Data/20250808_pbdbdat_filtered.csv")
+
+#change column names
+#set up time bin names
+env_sp <-  env_sp %>%  dplyr::rename(    
+  Time = time_bins,
+  Species = accepted_name,
+  long = lng
+      )
+```
+
+```{r}
+#use Near function to change lat and long of occurrence points so they fit on the rasters
+#calculate near points and set each occurrence point to the center of the nearest raster cell
+
+#load in a representative raster rile and convert to SpatRaster
+raster_EP <- "D:/Pleist_Clim/Enviro_Rasters/EPleist/SSS_max.tif"
+r <- terra::rast(raster_EP)
+
+#convert occurrences to sf
+occs_sf <- rSDM::locs2sf(
+  locs = env_sp,
+  lon.col = "long",
+  lat.col = "lat"
+)
+
+all_occ_near <- rSDM::points2nearestcell(
+  locs = occs_sf,
+  ras = r,
+  layer = 1,
+  move = TRUE,
+  distance = NULL,
+  table = TRUE,
+  map = c("ggplot")
+)
+
+#separate out lat and long again and convert to 2 decimal places
+all_occ_near <- all_occ_near %>%
+  dplyr::mutate(long = sf::st_coordinates(.)[,1],
+                lat = sf::st_coordinates(.)[,2])
+all_occ_near$lat <- VFP::signif2(all_occ_near$lat)
+all_occ_near$long <- VFP::signif2(all_occ_near$long)
+
+#add a column with coord as -180 to 180, so it can be plotted either way
+all_occ_near <- all_occ_near %>%
+  dplyr::mutate(long180 = as.numeric(long) - 360,
+                lat = as.numeric(lat))
+```
+
+
+```{R}
+# filtering by time bin
+
+#assignin wgs84 projection if not already assigned in layers
+wgs1984 <- "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
+
+#set working directory where rasters are
+setwd("D:/Pleist_Clim/Enviro_Rasters")
+
+### reading in the raster files; all layers must be the same file type
+# 
+Plio_files <- list.files(path='D:/Pleist_Clim/Enviro_Rasters/Plio', pattern='\\.tif$')
+EP_files <- list.files(path='D:/Pleist_Clim/Enviro_Rasters/EPleist', pattern='\\.tif$')
+MP_files <- list.files(path='D:/Pleist_Clim/Enviro_Rasters/MPleist', pattern='\\.tif$')
+LP_files <- list.files(path='D:/Pleist_Clim/Enviro_Rasters/LPleist', pattern='\\.tif$')
+H_files <- list.files(path='D:/Pleist_Clim/Enviro_Rasters/Holo', pattern='\\.tif$')
+Mod_files <- list.files(path='D:/Pleist_Clim/Enviro_Rasters/Modern', pattern='\\.tif$')
+
+#list out files for each time bin, make sure they are the same
+EP_files
+MP_files
+LP_files
+H_files
+Mod_files
+
+```
+
+```{R}
+#make a raster stack of all the rasters for the time bin, repeat for each time bin
+P.rasters <- raster::stack( paste0('D:/Pleist_Clim/Enviro_Rasters/Plio/', Plio_files) )
+EP.rasters <- raster::stack( paste0('D:/Pleist_Clim/Enviro_Rasters/EPleist/', EP_files) )
+MP.rasters <- raster::stack( paste0('D:/Pleist_Clim/Enviro_Rasters/MPleist/', MP_files) )
+LP.rasters <- raster::stack( paste0('D:/Pleist_Clim/Enviro_Rasters/LPleist/', LP_files) )
+H.rasters <- raster::stack( paste0('D:/Pleist_Clim/Enviro_Rasters/Holo/', H_files) )
+Mod.rasters <- raster::stack( paste0('D:/Pleist_Clim/Enviro_Rasters/Modern/', Mod_files) )
+
+#optionally assigning a crs if  one isn't provided
+crs(P.rasters) <- wgs1984
+crs(EP.rasters) <- wgs1984
+crs(MP.rasters) <- wgs1984
+crs(LP.rasters) <- wgs1984
+crs(H.rasters) <- wgs1984
+crs(Mod.rasters) <- wgs1984
+
+#verify the names are right and as expected for each raster stack
+names(EP.rasters)
+
+
+# re-naming the names of the rasters so they match 
+names(P.rasters) <- c('SSS_max', 'SSS_mean', 'SSS_min', 'SSS_rng', 'SST_max', 'SST_mean', 'SST_min', 'SST_rng')
+names(EP.rasters) <- c('SSS_max', 'SSS_mean', 'SSS_min', 'SSS_rng', 'SST_max', 'SST_mean', 'SST_min', 'SST_rng')
+names(MP.rasters) <- c('SSS_max', 'SSS_mean', 'SSS_min', 'SSS_rng', 'SST_max', 'SST_mean', 'SST_min', 'SST_rng')
+names(LP.rasters) <- c('SSS_max', 'SSS_mean', 'SSS_min', 'SSS_rng', 'SST_max', 'SST_mean', 'SST_min', 'SST_rng')
+names(H.rasters) <- c('SSS_max', 'SSS_mean', 'SSS_min', 'SSS_rng', 'SST_max', 'SST_mean', 'SST_min', 'SST_rng')
+names(Mod.rasters) <- c('SSS_max', 'SSS_mean', 'SSS_min', 'SSS_rng', 'SST_max', 'SST_mean', 'SST_min', 'SST_rng')
+
+#check that renaming was successful
+names(EP.rasters)
+
+#make sure e-layer names of each extent (time bin or region) is the same name and same order; if it is, will say TRUE
+identical( names(EP.rasters), names(MP.rasters) )
+```
+
+```{R}
+# making the background files
+#change region depending
+P.back <- make.background.df(r.stack=P.rasters, x.col='long', y.col='lat', time.bin='Plio', region='America')
+EP.back <- make.background.df(r.stack=EP.rasters, x.col='long', y.col='lat', time.bin='EPleist', region='America')
+MP.back <- make.background.df(r.stack=MP.rasters, x.col='long', y.col='lat', time.bin='MPleist', region='America')
+LP.back <- make.background.df(r.stack=LP.rasters, x.col='long', y.col='lat', time.bin='LPleist', region='America')
+H.back <- make.background.df(r.stack=H.rasters, x.col='long', y.col='lat', time.bin='Holo', region='America')
+Mod.back <- make.background.df(r.stack=Mod.rasters, x.col='long', y.col='lat', time.bin='Modern', region='America')
+```
+
+```{R}
+#visualize data points
+library(rspat)
+library(terra)
+
+#plot in a quick map
+cn <- spat_data("pt_countries")
+#set long and lat as relevant
+plot(cn, xlim=c(-130, -40), ylim=c(0,70), axes=TRUE)
+points(all_occ_near$long180, all_occ_near$lat, cex=.5, col='blue')
+```
+
+## Spatial Thinning and Occurrence Master File
+```{r}
+#group occs into time bins used in this study
+unique(all_occ_near$Time) #see what time bins are represented, to change below bins as needed
+
+
+##collapse times into bins used here
+all_occ_near <- all_occ_near %>% mutate(Time, fct_collapse(Time,
+    "Pliocene" = c("Pliocene"),
+    "Early Pleistocene" = c("Early Pleistocene", "Calabrian"),
+    "Middle Pleistocene" = c("Chibanian"),
+    "Late Pleistocene" = c("Late Pleistocene"),
+    "Holocene" = c("Holocene"),
+    "Modern" = c("Quaternary")
+  )
+)
+
+all_occ_near$Time <- all_occ_near$`fct_collapse(...)`
+
+#set factor levels so plots are in order
+all_occ_near$Time <-
+  factor(
+    all_occ_near$Time
+  , levels = c( "Modern"
+               , "Holocene"
+               , "Late Pleistocene"
+               , "Middle Pleistocene"
+               , "Early Pleistocene"
+               , "Pliocene"
+     )
+  )
+
+```
+
+```{R}
+#get only necessary data into a new data frame
+all_occ_thinned <- all_occ_near %>% dplyr::select(Species, Time, long, lat)
+
+all_occ_thinned <- all_occ_thinned %>%
+  sf::st_drop_geometry()  #remove the geometry column
+
+
+#remove duplicate points within each species and time bin
+#this creates a separate group for each unique combination of species and time, and then keeps only the unique coordinates therein
+all_occ_thinned <- all_occ_thinned %>%
+  group_by(Species, Time) %>%
+  distinct(long, lat, .keep_all = TRUE) %>%
+  ungroup()
+
+#verify how the variables are being stored
+str(all_occ_thinned)
+
+#change "long" to numeric
+all_occ_thinned$long <- as.numeric(all_occ_thinned$long)
+str(all_occ_thinned)
+```
+
+
+```{r}  
+#separate out time bins to run individual models
+plio_occ <- subset(all_occ_thinned, Time == "Pliocene")
+EP_occ <- subset(all_occ_thinned, Time == "Early Pleistocene")
+MP_occ <- subset(all_occ_thinned, Time =="Middle Pleistocene")
+LP_occ <- subset(all_occ_thinned, Time == "Late Pleistocene")
+H_occ <- subset(all_occ_thinned, Time == "Holocene")
+Mod_occ <- subset(all_occ_thinned, Time == "Modern")
+```
+
+
+```{r}
+#set up time-specific occurrence data linked with environmental data at that point
+P.occs.df <- make.occurrence.df(r.stack=P.rasters, 
+                                taxa.df=plio_occ[,c(1,3,4)], #select the Species, long and lat column
+                                x.col='long', 
+                                y.col='lat', 
+                                time.bin='Plio', 
+                                region='All') #set region to whatever makes sense
+EP.occs.df <- make.occurrence.df(r.stack=EP.rasters, taxa.df=EP_occ[,c(1,3,4)],
+                                x.col='long', y.col='lat', time.bin='EPleist', region='All')
+MP.occs.df <- make.occurrence.df(r.stack=MP.rasters, taxa.df=MP_occ[,c(1,3,4)],
+                                x.col='long', y.col='lat', time.bin='MPleist', region='All')
+LP.occs.df <- make.occurrence.df(r.stack=LP.rasters, taxa.df=LP_occ[,c(1,3,4)],
+                                x.col='long', y.col='lat', time.bin='LPleist', region='All')
+H.occs.df <- make.occurrence.df(r.stack=H.rasters, taxa.df=H_occ[,c(1,3,4)],
+                                x.col='long', y.col='lat', time.bin='Holo', region='All')
+M.occs.df <- make.occurrence.df(r.stack=Mod.rasters, taxa.df=Mod_occ[,c(1,3,4)],
+                                x.col='long', y.col='lat', time.bin='Mod', region='All')
+
+```
+
+
+```{r}
+# checking to see if everything has identical column names for your different extents
+identical( colnames(EP.back), colnames(MP.back) )
+identical( colnames(MP.back), colnames(LP.back) )
+identical( colnames(LP.back), colnames(H.back) ) #to verify all the back files are labelled the same
+
+identical( colnames(EP.occs.df), colnames(MP.occs.df) )
+identical( colnames(MP.occs.df), colnames(LP.occs.df) )
+identical( colnames(LP.occs.df), colnames(H.occs.df) ) #to verify all the occ files are the same
+
+identical( colnames(EP.back), colnames(MP.occs.df) ) #to verify the back and occ files are the same
+
+#check for # occurrences in each taxon (check for doubles!)
+table(P.occs.df$Name)
+table(EP.occs.df$Name)
+table(MP.occs.df$Name)
+table(LP.occs.df$Name)
+table(H.occs.df$Name)
+table(M.occs.df$Name)
+```
+
+```{r}
+#before exporting all the data in the background file, find the extent we actually want to use for the model
+#plot in a quick map
+cn <- spat_data("pt_countries")
+#set long and lat as relevant to determine model extent
+plot(cn, xlim=c(-130, -40), ylim=c(15,70), axes=TRUE)
+points(all_occ_near$long180, all_occ_near$lat, cex=.5, col='blue')
+#remember that the data is stored with long 0-360 not -180-180
+
+
+```
+
+```{R}
+
+# merging  together the files if you only have 2 extents
+#master.background <- rbind(ceno.back, turo.back)
+
+# merging together files if you have more than 2 extents
+master.background <- do.call('rbind', list(P.back, EP.back, MP.back, LP.back, H.back, Mod.back) )
+# set extent to use for longitude
+master.background <- master.background %>% subset(long > 230 & long < 320)
+#set extent for latitude
+master.background <- master.background %>% subset(lat > 15 & lat < 70)
+
+#bind together time bins of occurrences
+master.occs <- rbind(P.occs.df, EP.occs.df, MP.occs.df, LP.occs.df, H.occs.df, M.occs.df)
+
+```
+
+```{r}
+#write final master files to folder
+setwd("D:/202508_MaxentModels")
+write.csv(master.background,  'master.background.csv', row.names = FALSE) #writes csv to folder
+write.csv(master.occs,  'master.occs.csv', row.names = FALSE) #writes csv to folder
+```
+
+```{r, eval=FALSE}
+#look at correlation between e-layers; any corr above r = 0.836 = r^2 = 0.7 - arbitrary, but "normal cut-off"
+#it is recommended to remove highly correlated variables from model
+#takes a while to run, run as needed
+PerformanceAnalytics::chart.Correlation(master.background[,6:11])
+```
+
+
+
