@@ -1,0 +1,283 @@
+---
+title: "Environmental Analysis"
+author: "Rhiannon Nolan"
+date: "April 02, 2023"
+output:
+  html_document:
+  toc: true
+---
+
+```{R, echo=FALSE}
+#GLOBAL R chunk options.
+#   (to hide this message add "echo=FALSE" to the code chunk options)
+
+knitr::opts_chunk$set(comment = NA, message = FALSE, warning = FALSE, width = 100)
+knitr::opts_chunk$set(fig.align = "center", fig.height = 4, fig.width = 6)
+
+#knitr::opts_chunk$set(cache = TRUE, autodep=TRUE)
+```
+
+## Aggregate maxent data 
+```{R}
+library(tidyverse)
+#search for species
+setwd("E:/202508_MaxentModels/3_MaxentModels_OldData")
+
+#list of species
+SppList <- list.files("D:/202508_MaxentModels/3_MaxentModels_OldData", pattern = "_") #only works as long as only folders have a "_" in them, change if needed so the list is just a list of taxa
+
+maxent_dat <- data.frame()
+
+
+#read in csv files from maxent models
+#for loop to find species, time bins
+
+for (Spp in SppList){ #for each species found in the model folder
+  
+  path <- paste0("D:/202508_MaxentModels/3_MaxentModels_OldData/", Spp)   #path for spp folder
+  
+  name <- strsplit(Spp, "_")[[1]] #set up the file name for the species
+  firstw <- name[1]
+  lastw <- name[2]
+  TAXON <- paste0(substr(firstw, 1, 1), substr(lastw, 1, 3)) 
+  
+  times <- list.files(path) #make a list of times available for the species
+  
+  for (t in times){ #read in the csv for that species at that time
+    
+    timepath <- paste0(path, "/", t) #set path to time folder
+    
+    file <- paste0(timepath, "/", TAXON, ".clim.output.", t, ".csv") #set path for csv file
+    if( file.exists(file)){
+    dat <- read.csv(file) #read in the file for that data
+    
+    #change threshold column names so they all can be bound by rows
+    dat <- dat %>% dplyr::rename(
+       suitability = paste0(TAXON, "_contin"),
+       raw_thresh = paste0(TAXON, "_thresh"),
+    )
+    maxent_dat <- bind_rows(maxent_dat, dat)#put it all in one dataframe
+    }
+  }
+}
+
+try(rm(SppList, path, name, firstw, lastw, TAXON, times, timepath, file, dat, t, Spp))
+```
+
+```{r}
+#save as a csv so it can be used later
+setwd("D:/202508_MaxentModels/4_MahalanobisDist")
+write.csv(maxent_dat, "olddat_maxent_data.csv", row.names = FALSE)
+```
+
+### Data Conversion
+
+```{R}
+library(tidyverse)
+path <- "D:/202508_MaxentModels/4_MahalanobisDist"
+
+#load in env csv file with lat, long, time bins,environmental data, and logistic predictions from MAXENT
+env <- maxent_dat
+rm(maxent_dat)
+#env <- read.csv(paste0(path, "/olddat_maxent_data.csv")) #use if not aggregating above
+```
+
+
+
+# Environmental Space
+
+```{R, fig.height = 8, fig.width = 8}
+# Scatterplot matrix of variables to check for colinearity
+library(ggplot2)
+library(GGally)
+
+#columns to use for analysis - check using names(env) to find which columns are environmental variables
+use_col_ind <- c(5:12)
+use_col_names <- names(env)[use_col_ind]
+use_col_names
+
+#scatterplot of environmental variables - takes a while to plot so just run when needed
+
+#p <-
+#  ggpairs(
+#    data = env,
+#    columns = use_col_names
+#  )
+#print(p)
+
+try(rm(use_col_ind, use_col_names))
+```
+
+## Set up variables for looping
+
+```{r}
+#list of species
+SppList <- list.files("D:/202508_MaxentModels/3_MaxentModels_OldData", pattern = "_") #only works as long as only folders have a "_" in them, change if needed so the list is just a list of taxa
+
+Results <- data.frame() #now it has no data, so we can append rows from model results
+
+```
+
+
+```{r}
+# iterate through species and calculate mahalanobis distances within each time bin
+for( Spp in SppList ){
+  
+  dat <- subset(env, Name == Spp) #filter to just that species
+  
+  if(nrow(dat)>0){
+    times <- as.list(unique(dat$time.bin)) #list of the available times for that species
+    
+    for (i in 1:length(times)) {
+      
+      time_occs <- subset(dat, time.bin == times[[i]]) #filter out just data for that time bin
+      occs <- subset(time_occs, raw_thresh > 0) #subset of only suitable habitat points
+      clim <- as.matrix(occs[,5:12]) #convert to matrix - suitable habitat data
+      back <- as.matrix(time_occs[,5:12]) #convert to matrix - all env data
+      
+      if (nrow(clim)>4) { #make it conditional so the loop isn't stopped by too few points
+        
+        model <- stats::prcomp(clim) #make a PCA of suitable habitat
+        b_pca <- predict(model, back) #plot background points in the PCA niche space
+        coords <- as.data.frame(b_pca) #save the predicted point coordinates
+        df_env <- data.frame(coords$PC1, coords$PC2, coords$PC3)
+        df_env <-df_env %>% mutate(id = 1:n())
+    
+        mve_env <- MASS::cov.rob(df_env) #estimate multivariate centroid and scatter
+        
+        #save mahalanobis distances for this run
+        finaldata <- bind_cols(time_occs[, c(1:4, 13:14)], df_env)
+        finaldata$mahal <- mahalanobis(df_env, mve_env$center, mve_env$cov)
+        finaldata$species <- Spp
+        finaldata$time.bin <- times[[i]]
+      
+        #save results to overall results data frame
+        Results <- bind_rows(Results, finaldata)
+      
+      } else { 
+        print(paste0("Can't calculate mve for ", Spp, " at time ", times[[i]]))
+      }      
+    
+    
+    } #for loop running models for each time
+
+    } #if loop preventing zero data entries from halting loop
+  else {
+      print(paste0("No data for ", Spp))
+  } #
+
+  } #for loop going through species
+
+
+setwd("D:/202508_MaxentModels/5_DataVisualization")
+
+write.csv(Results, 'OldData_Mahalanobis_Results.csv', row.names = F)
+
+try(rm(b_pca, back, clim, coords, dat, df_env, finaldata, model, 
+   mve_env, occs, pca_coords, Results, time_occs, times,
+   i, mahal_env, rcount, Spp, SppList))
+
+```
+
+```{r}
+#run models on cumulative time data
+
+SppList <- unique(env$Name) #to prevent a lack of model info from stopping the loop
+CumulResults <- data.frame()
+
+for( Spp in SppList){
+  dat <- subset(env, Name == Spp) #filter to just that species
+  dat_cumul <- subset(dat, raw_thresh > 0) #suitable points
+  clim_cumul <- as.matrix(dat_cumul[,5:12]) 
+  back_cumul <- as.matrix(dat[,5:12]) #convert to matrix - all env data
+  
+  model_cumul <- stats::prcomp(clim_cumul) #make a PCA of suitable habitat
+  b_pca_cumul <- predict(model_cumul, back_cumul) #plot background points in the PCA niche space
+
+  df_env_cumul <- as.data.frame(b_pca_cumul[,1:3])
+  names(df_env_cumul) <- c("PC1", "PC2", "PC3")
+  
+  mve_env_cumul <- MASS::cov.rob(df_env_cumul) #estimate multivariate centroid and scatter
+  mahal_env_cumul <- mahalanobis(df_env_cumul, mve_env_cumul$center, mve_env_cumul$cov) #calc mahalanobis dist from centroid
+  
+  
+  finaldata_cumul <- bind_cols(dat, df_env_cumul)
+  finaldata_cumul$CumulMahal <- mahal_env_cumul
+  finaldata_cumul$time.bin <- "Cumul"
+  finaldata_cumul$species <- Spp
+  
+  CumulResults <- bind_rows(CumulResults, finaldata_cumul)
+}
+
+
+setwd("D:/202508_MaxentModels/5_DataVisualization")
+write.csv(CumulResults, 'OldData_Mahalanobis_Results_Cumulative.csv', row.names = F)
+
+#make a quick plot
+df_env_cumul <- as.data.frame(b_pca_cumul[,1:2])
+mve_env_cumul <- MASS::cov.rob(df_env_cumul)
+cluster::ellipsoidPoints(mve_env_cumul$cov, d2 = d2.95, loc=mve_env_cumul$center) -> matEllipseHullRob
+
+plot(matDat, asp = 1, xlim = c(-3, 3))
+lines(matEllipseHull95, col="blue")
+lines(matEllipseHullRob, col="green")
+
+#options(suppressWarnings(
+#  try(rm(b_pca_cumul, back_cumul, clim_cumul, coords_cumul, CumulResults, 
+#       dat, dat_cumul, df_env_cumul, finaldata_cumul, model_cumul, 
+#       mve_env_cumul, pca_coords, Results, rcount, Spp, SppList,
+#       mahal_env_cumul, env))))
+```
+
+```{r}
+time_bins <- read.csv("D:/202508_MaxentModels/5_DataVisualization/OldData_Mahalanobis_Results.csv")
+simple <- time_bins[, c(1:5, 11)]
+columns <- names(simple)
+
+cumulative <- read.csv("D:/202508_MaxentModels/5_DataVisualization/OldData_Mahalanobis_Results_Cumulative.csv")
+cumulative$time.bin <- "Cumul" #change time designation for cumulative data
+cumulative <- cumulative %>% dplyr::rename_at('CumulMahal', ~'mahal')
+
+cumulative_simple <- dplyr::select(cumulative, all_of(columns))
+
+#verify the columns are identical
+identical(colnames(simple), colnames(cumulative_simple))
+
+#join the two so the cumulative and time specific mahal values are attached to each point
+simpledat <- dplyr::full_join(simple, cumulative_simple)
+
+#save as csv
+setwd("D:/202508_MaxentModels/5_DataVisualization")
+write.csv(simpledat, 'OldData_Mahal_Results_All.csv', row.names = F)
+
+#try(rm(cumulative, cumulative_simple, simple, time_bins, columns))
+```
+
+
+```{r}
+#for fun, plot the points in PC space
+library(scatterplot3d)
+
+species <- unique(time_bins$Name)
+times <- unique(time_bins$time.bin)
+
+spp <- species[1] #choose a species
+t <- times[1] #choose a time
+
+coords <- subset(time_bins, c(Name == spp & suitability == 1))
+
+coords <- stats::na.omit(coords)
+
+scatterplot3d::scatterplot3d(coords$coords.PC1, coords$coords.PC2, coords$coords.PC3
+              , type="h"                          #show 3d locations
+              , pch = 16, color="steelblue"       #change point color
+              , main = "3D Scatterplot in PC Space"
+              , xlab = "Component 1"
+              , ylab = "Component 2"
+              , zlab = "Component 3"
+              )
+```
+
+
+
+
