@@ -1,0 +1,229 @@
+
+```{r}
+##### Packages -------------------------------------------------------------------------------------------------------------
+#list of required packages
+packs <- c('dismo', 'dplyr', 'ggplot2', 'rJava', 'devtools',
+           'tidyr', 'utils', 'PerformanceAnalytics', 'splitstackshape')
+
+#install necessary packages
+for (i in seq_along(packs)){
+  if (!require(packs[i], character.only=T)){ #install any missing pacls
+    install.packages(packs[i])
+  }
+}
+
+if(!require(kuenm)){
+    devtools::install_github("marlonecobos/kuenm")
+}
+library(kuenm)
+
+# loading in the packages
+lapply(packs, library, character.only=T)
+rm(packs)
+```
+
+```{r, eval=FALSE}
+# giving the package versions
+packs.df <- as.data.frame(matrix(NA, nrow=length(packs), ncol=2))
+colnames(packs.df) <- c('pkg.name', 'pkg.version')
+for(i in 1:length(packs)){
+  packs.df[i,1] <- packs[i]
+  packs.df[i,2] <- as.character(packageVersion(packs[i]))
+}
+packs.df
+
+# test if the maxent.jar file is in the dismo folder
+list.files( system.file('java', package = 'dismo') )
+# [1] "dismo.jar"  "maxent.jar"
+
+
+```
+
+```{r}
+##### Loading in the Data --------------------------------------------------------------------------------------------------
+
+# master background file
+wd <- "D:/202508_MaxentModels/3_MaxentModels_OldData"
+setwd(wd)
+
+#master background file
+achenm.back <- read.csv('master.background.csv', header=T)
+
+# master occurrance  file; column name identical to centur.back
+achenm.occ <- read.csv('master.occs.csv', header=T)
+
+#make sure colnames match
+identical(colnames(achenm.back), colnames(achenm.occ))
+
+```
+
+```{r}
+#run only if needed
+# making folders for all the taxa - choose the time bin with the most taxa
+setwd("D:/202508_MaxentModels/3_MaxentModels_OldData") #set wd to where you want the models to be stored
+taxa_table <- as.data.frame(table(achenm.occ[,1])) %>% filter(Freq>8)
+if(dir.exists(paste0( getwd(), '/', taxa_table[1,1]))){
+  print("Already done.")
+} else {
+   for(i in 1:nrow(taxa_table) ){
+   dir.create( paste0( getwd(), '/', taxa_table[i,1] ) )
+  }
+}
+
+rm(taxa_table, i)
+```
+# Run Models
+
+```{r}
+#find extent of occurrence data - set training region to just larger than that
+min.lng <- min(achenm.occ$long) - 2
+max.lng <- max(achenm.occ$long) + 2
+min.lat <- min(achenm.occ$lat) - 2
+max.lat <- max(achenm.occ$lat) + 2
+
+#list all time bins
+times <- split(achenm.occ, achenm.occ$time.bin)
+Nulls <- list() #store null models
+Models <- list() #store model outputs
+Summaries <- list() #store eval summaries
+Evals <- list()
+
+#for (i in seq_along(times)){
+#set up model runs
+for (i in seq_along(times)){
+  allback <- achenm.back %>% filter(time.bin == names(times[i])) #background for world
+  back <- allback %>% filter(  #training background
+    long >= min.lng & long <= max.lng & 
+    lat >= min.lat & lat <= max.lat)
+  allocc <- achenm.occ %>% filter(time.bin == names(times[i])) #filter out occs for this time bin
+  TIMEHERE <- as.character(unique(allocc$time.bin)) #time as a character for use in naming
+  
+  tabspp <- as.data.frame( table(allocc[,1]) ) %>% filter(Freq>=5) #only taxa with >=5 occs
+  Species <- as.list(as.character(tabspp$Var1)) #list of species that can be used to make model
+  rm(tabspp)
+  
+  for (j in seq_along(Species)){
+    
+    spp <- Species[[j]]
+    s_pp <- strsplit(spp, "_")
+    s_pp <- s_pp[[1]]
+    firstw <- s_pp[1]
+    lastw <- s_pp[2] #this is all to set up the names given to the models
+    TAXON <- paste0(substr(firstw, 1, 1), substr(lastw, 1, 3)) #species code for less clutter
+    Run <- paste0(TAXON, ".", TIMEHERE)
+    
+    occ <- allocc %>% filter(Name == Species[[j]]) #filter to occs for just this species
+    source("D:/202508_MaxentModels/3_MaxentModels/ENM-Functions-NF.R") #set source to where code with functions is
+    
+    sppwd <- paste0(wd, "/", spp) #set wd to current species folder
+    setwd(sppwd)
+    
+    if (dir.exists(paste0(sppwd, "/", TIMEHERE))){
+      unlink((paste0(paste0(sppwd, "/", TIMEHERE))), recursive = T, force = T) } #delete any previous model in the time folder
+
+    dir.create(paste0(sppwd, "/", TIMEHERE)) #make a new folder for the time bin
+    setwd((paste0(sppwd, "/", TIMEHERE)))
+    
+    #set up null model
+    Spp.null <- create.null.df(TAXON, TIMEHERE, 'All')
+    # create summary df
+    Spp.summary <- create.summary.df(TAXON, TIMEHERE, 'All')
+    create.folders.for.maxent(Spp.summary)
+    
+    # run null model
+    Spp.null  <- null.aic(null.df = Spp.null,
+                               occs = occ,
+                               background = back,
+                               first.occ.col = 15)
+    Nulls[[Run]] <- Spp.null
+    nullAicc <- Spp.null$AICc # null model AICc value to compare model runs
+
+    # find most optimized model
+    options(suppressWarnings(
+      Spp.optim <- optimize.maxent.likelihood(Spp.summary,   # name of the output summary file
+                                                 occs = occ,   # species occurrences
+                                                 background = back,   # background for time bin
+                                                 predic = 6:13,   # column numbers of the predictor variables
+                                                 first.occ.col = 15)))
+    
+    Models[[Run]] <- Spp.optim
+    # Look for low AICc values to identify the two best models and compare them
+    min_AICc <- Spp.optim %>% dplyr::slice_min(AICc, n = 2)
+    #is the difference between AICc - AIC > 2?
+    if(!is.na(min_AICc$AICc[1])){ 
+      if ((nullAicc - min_AICc$AICc[1]) > 2){
+      lambdas <- min_AICc$lambdas
+    } else {
+      print(paste0("Model for ", spp, " at time ", TIMEHERE, " is not significant."))
+    }
+    
+    #crossvalidate models
+    Spp.eval<- create.eval.df(TAXON, TIMEHERE, 'All', beta.values = min_AICc$Betas[1], f.class = min_AICc$Features[1])
+
+    create.folders.for.maxent(Spp.eval)     # create folders for this model
+    
+    # run eval object
+    options(suppressWarnings(
+    Spp.eval<- maxent.crossval.error(eval.df = Spp.eval,
+                                                  occs = occ,   # species occurrences
+                                                  background = back,   # background
+                                                  predic = 6:13,   # column numbers of the predictor variables
+                                                  first.occ.col = 15,
+                                                  first.test.col = 20,
+                                                  omission.rate = .1, #express as proportion
+                                                  all.background = allback)))
+    
+    #save to evaluate model
+    Evals[[Run]] <- Spp.eval
+    Summaries[[Run]] <- Spp.eval$summary
+    
+    
+    
+    #get threshold value
+    thisrun <- Spp.optim %>% dplyr::slice_min(AICc, n = 1)
+    mod <- thisrun$Features
+    betas <- thisrun$Betas
+    lambdas <- thisrun$lambdas
+    
+    results <- read.csv((paste0(sppwd, "/", TIMEHERE, "/abcde/", mod, "/beta_", betas, "/maxentResults.csv")))
+    thresh <- results$Maximum.training.sensitivity.plus.specificity.Logistic.threshold
+    Spp.means <- maxent.eval(eval = Spp.eval)
+    
+    #project to world
+    Spp.clim.everything<- maxent.everything(eval = Spp.eval,
+                                                  thresh = thresh,
+                                                  means = Spp.means,
+                                                  everything=allback,
+                                                  predic = 6:13)
+    
+    #write csvs of results
+    Spp.clim.output <- allback %>% dplyr::select('Name', 'long', 'lat', 'time.bin', 'SSS_max', 'SSS_mean', 'SSS_min', 'SSS_rng', 'SST_max', 'SST_mean', 'SST_min', 'SST_rng')
+    Spp.clim.output <- cbind(Spp.clim.output, Spp.clim.everything)
+    Spp.clim.output$Name <- Species[[j]]
+    clim_out <- paste0(TAXON, ".clim.output.", TIMEHERE, ".csv") #set up name for output file
+    write.csv(Spp.clim.output, clim_out, row.names = F)
+    
+    write.csv(Spp.null, paste0(Run, '.null.csv'), row.names = F)
+    # model optimized summary object
+    write.csv(Spp.optim, paste0(Run, '.summary.csv'), row.names = F)
+    # model projected to all extents
+    write.csv(Spp.clim.everything, paste0(Run, '.everything.csv'), row.names = F)
+
+    # record model and threshold
+    write.csv(min_AICc, "minimum_AICc_models.csv")
+    write.csv(thresh, paste0(Run, 'threshold.csv'), )
+    
+    } else { #end of the if loop for whether a model was produced
+      print(paste0("No model produced for ", Run))}
+  }
+
+
+}
+
+try(rm(max.lat, max.lng, min.lat, min.lng, i, j,
+       back, occ, TIMEHERE, Species, spp, firstw, 
+       lastw, TAXON, S_pp, sppwd, 
+       min_AICc, allback, allocc, 
+       Spp.eval, Spp.null, Spp.optim, Spp.summary,
+       tabspp, times))
+```
