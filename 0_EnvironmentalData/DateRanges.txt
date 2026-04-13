@@ -1,0 +1,6 @@
+Plio = 2592 to 3600 K
+EPleist = 784 to 2588 K
+MPleist =128 to 780 K
+LPleist = 13 to 124 K
+Holo = 0 t0 12 K
+Modern = 0 to 4 K
