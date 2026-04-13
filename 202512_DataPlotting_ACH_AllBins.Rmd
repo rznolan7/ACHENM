@@ -1,0 +1,382 @@
+---
+title: "Environmental Analysis"
+author: "Rhiannon Nolan"
+date: "April 02, 2023"
+output:
+  html_document:
+  toc: true
+editor_options: 
+  chunk_output_type: console
+---
+
+```{R, echo=FALSE}
+#GLOBAL R chunk options.
+#   (to hide this message add "echo=FALSE" to the code chunk options)
+
+knitr::opts_chunk$set(comment = NA, message = FALSE, warning = FALSE, width = 100)
+knitr::opts_chunk$set(fig.align = "center", fig.height = 4, fig.width = 6)
+
+#knitr::opts_chunk$set(cache = TRUE, autodep=TRUE)
+
+```
+
+This script uses csv files created after maxent models have been run for all species across all time bins. 
+First the tables of results are filtered to include only environmental pixels where threshold = 1 (inside the realized niche).
+
+## Set Up Workspace
+
+```{r}
+#install necessary packages
+if (!require(rstudioapi)){install.packages("rstudioapi")}
+me <- (rstudioapi::getActiveDocumentContext()$path) #get current file name
+
+if (!require(renv)){ install.packages("renv")}
+packs <- unique(renv::dependencies(me)$Package) #list of packages needed 
+
+for (i in seq_along(packs)){
+  if (!require(packs[i], character.only=T)){ #install any missing pacls
+    install.packages(packs[i])
+  }
+}
+
+lapply(packs, library, character.only=T) #load packages
+rm(me, packs, i) #clean env
+```
+
+
+## Load in all csv files
+```{R}
+setwd(dirname(rstudioapi::getSourceEditorContext()$path)) #set file location as wd
+
+
+file <- list.files(paste0(getwd()), pattern = "csv", full.names = TRUE) #find csv file with data
+
+#choose which one is actually right
+file <- file[4]
+
+data <- read.csv(file) #make data frame of imported data
+data <- tibble::rowid_to_column(data, var = "ID") #add row ID column
+data <- data %>% subset(
+  select = c(ID, Name, long, lat, time.bin, suitability, mahal)
+)
+head(data) #does it look right?
+
+
+data$times <- data$time.bin #make a new variable that stays a character for simplicity later on
+unique(data$times) #list all time bins present
+
+#change time bin order for plotting
+data$time.bin <- as.factor(data$time.bin)
+levels(data$time.bin) #what is the current order?
+
+#change order or components if necessary
+data$time.bin <- factor(data$time.bin, levels=c('EPleist', 'MPleist', 'LPleist', 'Holo', 'Modern', 'Cumul'))
+
+
+#filter to include the expanded training region only for a "realized niche" model
+achenm.occ <- read.csv("D:/202508_MaxentModels/3_MaxentModels_OldData/master.occs.csv", header=T)
+min.lng <- min(achenm.occ$long) - 2
+max.lng <- max(achenm.occ$long) + 2
+min.lat <- min(achenm.occ$lat) - 2
+max.lat <- max(achenm.occ$lat) + 2
+
+data_RN <- data %>% filter(
+    long >= min.lng & long <= max.lng & 
+    lat >= min.lat & lat <= max.lat)
+
+#optional
+data <- data_RN
+
+try(rm(file, min.lng, max.lng, min.lat, max.lat, achenm.occ, data_RN))
+```
+
+## Set up Datasets
+
+```{r}
+#set up data groupings by species and time bin
+list_of_data <- list()
+times <- unique(data$time.bin)
+
+for (time in times) { #divide data into time bins
+  dat <- filter(data, time.bin == time)
+  spp <- as.list(unique(dat$Name))
+  
+  for (i in seq_along(spp)) { #divide data into species
+    data_subset <- as.data.frame(filter(dat, Name == spp[[i]]))
+    name <- stringr::str_split_1(spp[[i]], "_") #set up sample name
+    sample <- paste(substr(name[1], 1, 1), substr(name[-1], 1, 3), sep = ".")
+    sample <- paste(sample, time, sep = ".") #set up name
+    list_of_data[[sample]] <- data_subset
+  }
+  }
+
+rm(dat, spp, data_subset, name, sample, time, i, times) #clean env
+
+#verify the list of data looks right
+names(list_of_data) #datasets in list
+head(list_of_data[[2]]) #see which species is which, change number to change species
+```
+
+```{r}
+#set up bins of only suitable data - where habitability score > threshold
+bins_hist <- list() #make empty list of histograms
+
+for(i in seq_along(list_of_data)){
+  dat <- as.data.frame(list_of_data[[i]])
+  dat <- filter(dat, suitability > 0) #filter to suitable data
+  if(nrow(dat)>0){ #perform only if there is data at that time
+    name <- names(list_of_data)[i] #keep names consistent
+    bins_hist[[name]] <- dat
+    rm(dat, name)
+  } else {
+  print(paste0("No data for ", dat$Name[1], " at time ", i)) #lets us know there were empty times
+  }
+}
+rm(i) #clean env
+```
+###Hereafter, list_of_data includes all data in each bin, bins_hist includes only suitable data.
+
+## Linear Models
+
+```{r}
+#make linear models
+
+histograms <- list()
+sequence_data <- list()
+
+#set up histograms
+for (i in seq_along(bins_hist)) {
+  #make histogram
+  summ <- summary(bins_hist[[i]]$mahal) #set up summary object (to get min mahal dist max&min)
+  species <- bins_hist[[i]]$Name[1] #name the histogram
+  time <- bins_hist[[i]]$time.bin[1] #time period
+  run <- names(bins_hist)[i]
+  hist_mahal <- hist(bins_hist[[i]]$mahal, 
+                     breaks = nrow(subset(bins_hist[[i]], time.bin == time)), 
+                     main = paste0("Mahalanobis frequencies for ", species, " during the ", time))
+  histograms[[run]] <- hist_mahal #save histogram
+  
+  #get mahalanobis distances and frequencies for lms
+  sequence <- data.frame(
+    species = species,
+    time = time,
+    id = seq_along(hist_mahal$counts), # Create an ID for bins
+    mahal = seq(from = summ[[1]], #for more accurate information, use mahal dist values
+              to = summ[[6]],
+              by = (summ[[6]]-summ[[1]])/(length(hist_mahal$counts)-1)),
+    freq = hist_mahal$counts          # Use the counts from the histogram
+  )
+  rows <- round((nrow(sequence)*0.97), digits = 0) 
+  sequence <- sequence %>% filter(row_number() <= n()-rows) #filter out the last 3% (use only 97% of suit hab)
+  
+  sequence_data[[run]] <- sequence
+}
+
+try(rm(species, time, i, rows, run, summ, hist_mahal, sequence))
+```
+
+```{r}
+#set up to get p-value from lms
+p_val <- function(model) {
+    f <- summary(model)$fstatistic
+    p <- pf(f[1],f[2],f[3],lower.tail=F)
+    attributes(p) <- NULL
+    return(p)
+}
+
+
+#make linear models using the histogram data
+list_of_lms <- list()
+lm_coefs<- data.frame()
+columns= c("species","time","R2","Adj_R2","p-value") 
+lm_R2p <- data.frame()
+plots <- list()
+seg_fits <- list()
+segfits_data <- list()
+seg_plots <- list()
+
+
+for (i in seq_along(sequence_data)){
+  run <- names(sequence_data)[i]
+  species <- sequence_data[[i]]$species[1] #name the histogram
+  time <- as.character(sequence_data[[i]]$time[[1]]) #time period
+  
+  #fit linear models
+  freqmahal <- lm(freq ~ mahal, data = sequence_data[[i]])
+  list_of_lms[[run]] <- freqmahal
+  
+  #segmented fit
+  seg <- segmented::segmented(freqmahal, seg.Z = ~ mahal)
+  seg_fits[[run]] <- seg
+  fit <- numeric(length(sequence_data[[i]]$mahal))
+  fit[complete.cases(rowSums(cbind(sequence_data[[i]]$freq, sequence_data[[i]]$mahal)))] <- broken.line(seg)$fit
+  dat_segfit <- data.frame(mahal = sequence_data[[i]]$mahal, freq = sequence_data[[i]]$freq, fit = fit)
+  segfits_data[[run]] <- dat_segfit
+  
+  
+  #get coefficients, R2 and p-value
+  R2p <- c(species, time, summary(freqmahal)[[8]], summary(freqmahal)[[9]], p_val(freqmahal))
+  lm_R2p <- rbind(lm_R2p, R2p)
+  
+  coeffs <- as.data.frame(summary(freqmahal)$coefficients, col.names = T, row.names = F)
+  coeffs$Value <- c("Intercept", "Mahal")
+  coeffs$time <- time
+  coeffs$species <- species
+  lm_coefs <- rbind(lm_coefs, coeffs)
+  
+  #title <- paste0(species, " at time ", time) 
+  #make plots
+  plot <- ggplot2::ggplot(sequence_data[[i]], aes(x = mahal, y = freq)) +
+    geom_point(color = "#74A089") +
+    geom_smooth(method = "lm", color = "#CB7A5C") +
+    
+    labs(x = "Mahal dist", y = "Freq (~Abun)") +
+    annotate("text", x = min(sequence_data[[i]]$mahal), y = max(sequence_data[[i]]$freq), 
+             label = paste("R² =", round(as.numeric(R2p[4]), 3)), hjust = 0, vjust = 1, size = 3, color = "darkgray") +
+    theme_minimal() +
+    ylim(0, NA)  # Set lower limit to 0 and keep upper limit as it is
+  
+  # Save the plot to a variable with a dynamic name
+  plots[[run]] <- plot
+  rm(plot)
+  
+  #make segmented fit plots
+  plot <- ggplot() +
+        geom_point(data = dat_segfit, 
+                   aes(x = mahal, y = freq), color = "#525174") +
+        geom_line(data = dat_segfit, aes(x = mahal, y = fit), color = "#68B0AB", linewidth = 1) +
+        labs(x = "Mahal dist", y = "Freq (~Abun)") +
+        annotate("text", x = min(sequence_data[[i]]$mahal), y = max(sequence_data[[i]]$freq), 
+             label = paste("R² =", round(as.numeric(summary(seg)[[9]]), digits = 3)), hjust = 0, vjust = 1, size = 3, color = "darkgray") +
+        theme_minimal() +
+        ylim(0, NA)  # Set lower limit to 0 and keep upper limit as it is
+  
+  seg_plots[[run]] <- plot
+}
+
+#fix names in the R2 and p-value df
+colnames(lm_R2p) = columns
+
+options(suppressWarnings(try(rm(i, summ, species, time, run, hist_mahal, 
+                                sequence, rows, columns, R2p, p_val, coeffs, plot,
+                                dat_segfit, freqmahal, lm_coefs, lm_R2p, seg, fit)))) #clean env
+```
+
+```{r}
+#compare habitat suitability and mahalanobis distance to verify base assumption of ACH
+suitfits <- list()
+suitplots <- list()
+
+
+for (i in seq_along(list_of_data)){
+  run <- names(list_of_data)[i]
+  
+    #fit linear models
+  lm <- lm(suitability ~ mahal, data = list_of_data[[i]])
+  suitfits[[run]] <- lm
+  
+  #make plots
+    #make plots
+  plot <- ggplot(list_of_data[[i]], aes(x = mahal, y = suitability)) +
+    geom_point(color = "#5E548E") +
+    geom_smooth(method = "lm", color = "#3A506B") +
+    
+    labs(x = "Mahal dist", y = "Suitability") +
+    annotate("text", x = min(list_of_data[[i]]$mahal), y = max(list_of_data[[i]]$suitability), 
+             label = paste("R² =", round(as.numeric(summary(lm)[[9]]), 3)), hjust = 0, vjust = 1, size = 3, color = "black") +
+    theme_minimal() +
+    ylim(0, NA)  # Set lower limit to 0 and keep upper limit as it is
+  
+  suitplots[[run]] <- plot
+  
+}
+
+try(rm(run, lm, plot, i,))
+```
+
+
+## Make Figures
+
+```{r}
+# Define the layout matrix for plots
+layout_matrix <- rbind(
+  # EP  MP  LP  H  M  C
+  c(1,  21, 9   ,3  ,14, 24 ), #Aaeq
+  c(2,  22, 10  ,4  ,15, 25 ), #Acor
+  c(NA, 23, 11  ,5  ,16, 26 ), #Cele 
+  c(NA, NA, 12  ,6  ,17, 27 ), #Lova
+  c(NA, NA, 13  ,7  ,18, 28 ), #Mcam
+  c(NA, NA, NA  ,8  ,19, 29 ), #Ptri
+  c(NA, NA, NA, NA  ,20, 30 )  #Sflo
+)
+
+```
+
+```{r}
+#linear models mahal vs frequency
+gridExtra::grid.arrange(grobs = plots,
+             layout_matrix = layout_matrix)
+
+#segmented models mahal vs frequency
+gridExtra::grid.arrange(grobs = seg_plots,
+             layout_matrix = layout_matrix)
+
+#suitability vs mahalanobis dist
+gridExtra::grid.arrange(grobs = suitplots,
+             layout_matrix = layout_matrix)
+```
+
+## Spearman Correlations
+
+```{r}
+#mahalanobis distance vs habitat suitability
+corrs_mahalsuit <- data.frame()
+
+for (i in seq_along(list_of_data)){
+  species <- list_of_data[[i]]$Name[1] #name the histogram
+  time <- as.character(list_of_data[[i]]$time.bin[1]) #time period
+  corr <- cor.test(as.numeric(list_of_data[[i]]$suitability), #set up spearman test
+                   as.numeric(list_of_data[[i]]$mahal),
+                   data = list_of_data[[i]],
+                   method = 'spearman')
+  if ( corr$p.value < 0.05) {
+    results <- c(species, time, corr$estimate, corr$p.value)
+  } else { 
+      results <- c(species, time, NA, NA)}
+  corrs_mahalsuit <- rbind(corrs_mahalsuit, results)
+}
+
+colnames(corrs_mahalsuit) = c("Species", "Time", "Rho", "p-value")
+
+path <- "D:/202508_MaxentModels/6_RPlots/Spearman_MahalSuit.csv"
+write.csv(corrs_mahalsuit, file = path)
+
+try(rm(species, time, corr, results, path, i))
+```
+
+```{r}
+#mahalanobis distance vs frequency
+corrs_mahalfreq <- data.frame()
+
+for (i in seq_along(sequence_data)){
+  species <- sequence_data[[i]]$species[1] #name the histogram
+  time <- as.character(sequence_data[[i]]$time[1]) #time period
+  corr <- cor.test(as.numeric(sequence_data[[i]]$freq), #set up spearman test
+                   as.numeric(sequence_data[[i]]$mahal),
+                   data = sequence_data[[i]],
+                   method = 'spearman')
+  if ( corr$p.value < 0.05) {
+    results <- c(species, time, corr$estimate, corr$p.value)
+  } else { 
+      results <- c(species, time, NA, NA)}
+  corrs_mahalfreq <- rbind(corrs_mahalfreq, results)
+}
+
+colnames(corrs_mahalfreq) = c("Species", "Time", "Rho", "p-value")
+
+path <- "D:/202508_MaxentModels/6_RPlots/Spearman_MahalFreq.csv"
+write.csv(corrs_mahalfreq, file = path)
+
+try(rm(species, time, corr, results, path, i))
+```
+
